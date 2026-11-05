@@ -60,7 +60,7 @@ MODEL_PATH=/absolute/path/export.pkl uvicorn app.server:app --port 5000 --limit-
 python -m pip install -r requirements-dev.txt
 python -m pip check
 python -m pytest -q
-pip-audit --disable-pip --no-deps -r requirements.txt
+python scripts/audit_dependencies.py
 node --check app/static/client.js
 ```
 

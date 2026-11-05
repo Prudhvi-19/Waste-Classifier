@@ -80,12 +80,16 @@ Local checks on CPython 3.11.17 / Linux x86_64:
 - 18 pytest tests passed, including real export/reload/HTTP prediction round
   trips for generated linear and ResNet-18 fast.ai v1 classifiers, multipart
   limits, missing/corrupt models, static files, CORS, and compatibility checks.
-- pip-audit 2.10.1 reported no known vulnerabilities across the 44 locked
-  runtime dependencies. A clean result is a point-in-time database check,
+- The audit wrapper uses pip-audit 2.10.1 to check all 44 locked runtime
+  dependencies, mapping the two official PyTorch +cpu builds to their upstream
+  public versions because the CPU builds are not published on PyPI. It fails
+  if any package is skipped. No known vulnerabilities were reported.
+  A clean result is a point-in-time database check,
   not a guarantee of absence of vulnerabilities.
 - JavaScript syntax and git whitespace checks passed.
 - Docker was unavailable in the local executor. The added GitHub CI workflow
-  builds the image and checks container startup/readiness; consult its run
+  builds the image, imports the ML stack as the non-root user, and checks
+  container startup/readiness; consult its run
   results for that separate validation.
 
 The original trained export is unavailable: the public download and a metadata

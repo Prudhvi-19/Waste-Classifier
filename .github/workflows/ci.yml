@@ -27,7 +27,7 @@ jobs:
           python -m pip install -r requirements-dev.txt
           python -m pip check
       - name: Audit all locked runtime dependencies
-        run: pip-audit --disable-pip --no-deps -r requirements.txt
+        run: python scripts/audit_dependencies.py
       - name: Test API and real CPU model round trips
         run: |
           python -m pytest -q
