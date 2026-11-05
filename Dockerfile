@@ -1,16 +1,18 @@
-FROM python:3.7-slim-stretch
+FROM python:3.11-slim-bookworm
 
-RUN apt-get update && apt-get install -y git python3-dev gcc \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    PORT=5000
+WORKDIR /app
 
 COPY requirements.txt .
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt && pip check
 
-RUN pip install --upgrade -r requirements.txt
-
-COPY app app/
-
-RUN python app/server.py
+COPY app ./app
+RUN useradd --create-home --uid 10001 classifier
+USER classifier
+RUN python -c "from app.fastai_compat import import_fastai_vision; import_fastai_vision(); import app.server"
 
 EXPOSE 5000
-
-CMD ["python", "app/server.py", "serve"]
+CMD ["sh", "-c", "exec uvicorn app.server:app --host 0.0.0.0 --port ${PORT:-5000} --limit-concurrency 16"]

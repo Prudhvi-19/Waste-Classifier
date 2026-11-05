@@ -1,69 +1,103 @@
-import aiohttp
+"""HTTP interface for the legacy fast.ai v1 waste classifier."""
 import asyncio
-import uvicorn
-from fastai import *
-from fastai.vision import *
+import logging
+import os
+from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
+
+from PIL import Image, UnidentifiedImageError
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
+from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-export_file_url = 'https://drive.google.com/uc?export=download&id=1tsT-ZiFvzJZBaUUaDp-be2CnOy8c_eHX'
-export_file_name = 'export.pkl'
-
-classes = ['O', 'R']
-path = Path(__file__).parent
-
-app = Starlette()
-app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_headers=['X-Requested-With', 'Content-Type'])
-app.mount('/static', StaticFiles(directory='app/static'))
+ROOT = Path(__file__).resolve().parent
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_REQUEST_BYTES = MAX_IMAGE_BYTES + 64 * 1024
+MAX_IMAGE_PIXELS = 16_000_000
+logger = logging.getLogger(__name__)
 
 
-async def download_file(url, dest):
-    if dest.exists(): return
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            data = await response.read()
-            with open(dest, 'wb') as f:
-                f.write(data)
+def validate_image(data):
+    with Image.open(BytesIO(data)) as image:
+        if image.width * image.height > MAX_IMAGE_PIXELS:
+            raise ValueError("Image dimensions are too large")
+        if image.format not in {"JPEG", "PNG", "WEBP"}:
+            raise ValueError("Use a JPEG, PNG, or WebP image")
+        image.verify()
 
 
-async def setup_learner():
-    await download_file(export_file_url, path / export_file_name)
-    try:
-        learn = load_learner(path, export_file_name)
-        return learn
-    except RuntimeError as e:
-        if len(e.args) > 0 and 'CPU-only machine' in e.args[0]:
-            print(e)
-            message = "\n\nThis model was trained with an old version of fastai and will not work in a CPU environment.\n\nPlease update the fastai library in your training environment and export your model again.\n\nSee instructions for 'Returning to work' at https://course.fast.ai."
-            raise RuntimeError(message)
-        else:
-            raise
+def create_app(predictor=None, model_path=None):
+    """Allow injected predictors for tests; production loads a trusted local export."""
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.predictor = predictor
+        app.state.predict_lock = asyncio.Lock()
+        if predictor is None:
+            from app.inference import load_predictor
+
+            location = Path(model_path or os.environ.get("MODEL_PATH", ROOT / "export.pkl"))
+            try:
+                app.state.predictor = await run_in_threadpool(load_predictor, location)
+            except Exception:
+                logger.exception("Cannot load classifier; provide a trusted fast.ai v1 export via MODEL_PATH")
+        yield
+
+    async def homepage(request):
+        return HTMLResponse((ROOT / "view" / "index.html").read_text())
+
+    async def health(request):
+        ready = request.app.state.predictor is not None
+        return JSONResponse({"status": "ok" if ready else "model_unavailable"}, status_code=200 if ready else 503)
+
+    async def analyze(request):
+        if request.app.state.predictor is None:
+            return JSONResponse({"error": "Classifier model is unavailable"}, status_code=503)
+
+        # Bound the complete body before multipart parsing, including chunked uploads.
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_REQUEST_BYTES:
+                return JSONResponse({"error": "Upload is too large"}, status_code=413)
+            body.extend(chunk)
+
+        async def receive():
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        bounded_request = Request(request.scope, receive)
+        async with bounded_request.form(max_files=1, max_fields=0, max_part_size=MAX_IMAGE_BYTES) as form:
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                return JSONResponse({"error": "Provide one image in the file field"}, status_code=400)
+            data = await upload.read(MAX_IMAGE_BYTES + 1)
+            if len(data) > MAX_IMAGE_BYTES:
+                return JSONResponse({"error": "Image is too large"}, status_code=413)
+            try:
+                await run_in_threadpool(validate_image, data)
+            except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+                return JSONResponse({"error": "Provide a valid JPEG, PNG, or WebP image within the size limit"}, status_code=400)
+
+        # fast.ai mutates learner state. Serialize calls and keep CPU work off the event loop.
+        async with request.app.state.predict_lock:
+            prediction = await run_in_threadpool(request.app.state.predictor, data)
+        return JSONResponse({"result": str(prediction)})
+
+    return Starlette(
+        lifespan=lifespan,
+        routes=[
+            Route("/", homepage),
+            Route("/health", health),
+            Route("/analyze", analyze, methods=["POST"]),
+            Mount("/static", StaticFiles(directory=ROOT / "static")),
+        ],
+        middleware=[Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST"], allow_headers=["X-Requested-With", "Content-Type"])],
+    )
 
 
-loop = asyncio.get_event_loop()
-tasks = [asyncio.ensure_future(setup_learner())]
-learn = loop.run_until_complete(asyncio.gather(*tasks))[0]
-loop.close()
-
-
-@app.route('/')
-async def homepage(request):
-    html_file = path / 'view' / 'index.html'
-    return HTMLResponse(html_file.open().read())
-
-
-@app.route('/analyze', methods=['POST'])
-async def analyze(request):
-    img_data = await request.form()
-    img_bytes = await (img_data['file'].read())
-    img = open_image(BytesIO(img_bytes))
-    prediction = learn.predict(img)[0]
-    return JSONResponse({'result': str(prediction)})
-
-
-if __name__ == '__main__':
-    if 'serve' in sys.argv:
-        uvicorn.run(app=app, host='0.0.0.0', port=5000, log_level="info")
+app = create_app()
