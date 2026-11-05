@@ -1,0 +1,16 @@
+# Supported deployment: CPython 3.11, Linux x86_64, CPU.
+--extra-index-url https://download.pytorch.org/whl/cpu
+# Preserve v1 exports: fastai v2 is not a drop-in model replacement.
+fastai==1.0.61
+fastprogress==1.0.3
+# Modern setuptools; app/fastai_compat.py replaces v1's removed version-check API.
+setuptools==84.2.1
+# Preserve NumPy 1.x behavior and the pandas API used by fastai v1.
+numpy==1.26.4
+pandas==2.3.3
+torch==2.15.0+cpu
+torchvision==0.29.2+cpu
+starlette==1.10.0
+uvicorn==0.54.0
+python-multipart==0.0.33
+Pillow==13.0.0
